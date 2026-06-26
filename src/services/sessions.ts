@@ -264,8 +264,22 @@ function sortSessionTime(session: CodexSession): number {
   return Number.isFinite(time) ? time : 0;
 }
 
+function latestIndexRowsById(indexRows: IndexRow[]): IndexRow[] {
+  const latestRows = new Map<string, IndexRow>();
+
+  for (const row of indexRows) {
+    const existing = latestRows.get(row.session.id);
+
+    if (!existing || sortSessionTime(row.session) >= sortSessionTime(existing.session)) {
+      latestRows.set(row.session.id, row);
+    }
+  }
+
+  return [...latestRows.values()];
+}
+
 export function listSessions(codexHome = defaultCodexHome()): CodexSession[] {
-  const indexRows = readIndexRows(codexHome);
+  const indexRows = latestIndexRowsById(readIndexRows(codexHome));
   const fileRows = scanSessionFiles(codexHome);
   const filesById = new Map(fileRows.map((session) => [session.id, session]));
   const seenIds = new Set<string>();
