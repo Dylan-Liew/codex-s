@@ -2,7 +2,7 @@
 
 `codex-s` installs the `cx` CLI, a small tool for listing and deleting local Codex sessions.
 
-It reads sessions from a local Codex home, supports interactive multi-select deletion, and requires typing `DELETE` before it removes matching session files or index entries.
+It reads the same local thread catalog used by Codex Desktop, supports interactive multi-select deletion, and requires typing `DELETE` before it removes matching session files, database rows, and cached Desktop state.
 
 ## Requirements
 
@@ -104,6 +104,6 @@ cx completion fish > ~/.config/fish/completions/cx.fish
 
 ## Notes
 
-- Close Codex before deleting sessions manually.
-- The CLI backs up `session_index.jsonl` before editing it.
+- Close Codex before deleting sessions so the running app cannot rewrite cached state.
+- The CLI backs up every index, database, or Desktop state file that it changes.
 - No sync, archive, rename, or export features are included yet.

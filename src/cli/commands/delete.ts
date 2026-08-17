@@ -26,10 +26,10 @@ function renderDeletePlan(sessions: CodexSession[]): string {
     session.location,
     sanitizeInline(session.title),
     session.filePaths.length,
-    session.fromIndex ? "yes" : "no",
+    session.fromCatalog ? "desktop" : session.fromIndex ? "index" : "file",
   ]);
 
-  return formatTable(["id", "updated", "state", "title", "files", "index"], rows);
+  return formatTable(["id", "updated", "state", "title", "files", "source"], rows);
 }
 
 async function resolveDeleteSessions(inputs: string[], codexHome: string): Promise<CodexSession[]> {
@@ -65,11 +65,17 @@ export async function runDeleteCommand(
 
   process.stdout.write(
     `\nDeleted ${summary.deletedFiles} session file(s).\n` +
-      `Removed ${summary.removedIndexEntries} index entr${summary.removedIndexEntries === 1 ? "y" : "ies"}.\n`,
+      `Removed ${summary.removedIndexEntries} legacy index entr${summary.removedIndexEntries === 1 ? "y" : "ies"}.\n` +
+      `Removed ${summary.removedDatabaseEntries} database entr${summary.removedDatabaseEntries === 1 ? "y" : "ies"}.\n` +
+      `Removed ${summary.removedStateReferences} Desktop state reference${summary.removedStateReferences === 1 ? "" : "s"}.\n`,
   );
 
   if (summary.backupPath) {
     process.stdout.write(`Index backup: ${summary.backupPath}\n`);
+  }
+
+  for (const backupPath of summary.additionalBackupPaths) {
+    process.stdout.write(`State backup: ${backupPath}\n`);
   }
 }
 

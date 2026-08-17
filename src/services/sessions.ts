@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fail } from "../lib/errors.js";
 import { resolveCodexHome, type CodexHomeOptions } from "./config.js";
 
@@ -12,6 +13,7 @@ export interface CodexSession {
   location: "active" | "archived" | "missing";
   filePaths: string[];
   fromIndex: boolean;
+  fromCatalog: boolean;
   indexRecord?: Record<string, unknown>;
 }
 
@@ -23,7 +25,16 @@ interface IndexRow {
 export interface DeleteSummary {
   deletedFiles: number;
   removedIndexEntries: number;
+  removedDatabaseEntries: number;
+  removedStateReferences: number;
   backupPath?: string;
+  additionalBackupPaths: string[];
+}
+
+interface CatalogRecord {
+  id: string;
+  title: string;
+  updatedAt: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -36,6 +47,14 @@ export function defaultCodexHome(options: CodexHomeOptions = {}): string {
 
 export function getIndexPath(codexHome = defaultCodexHome()): string {
   return path.join(codexHome, "session_index.jsonl");
+}
+
+export function getDesktopCatalogPath(codexHome = defaultCodexHome()): string {
+  return path.join(codexHome, "sqlite", "codex-dev.db");
+}
+
+export function getStateDatabasePath(codexHome = defaultCodexHome()): string {
+  return path.join(codexHome, "state_5.sqlite");
 }
 
 function getSessionDirs(codexHome: string): string[] {
@@ -212,6 +231,7 @@ function readIndexRows(codexHome: string): IndexRow[] {
         location: "missing",
         filePaths: [],
         fromIndex: true,
+        fromCatalog: false,
         indexRecord: record,
       },
     });
@@ -242,6 +262,7 @@ function scanSessionFiles(codexHome: string): CodexSession[] {
       location: sessionLocation([filePath]),
       filePaths: [filePath],
       fromIndex: false,
+      fromCatalog: false,
     });
   }
 
@@ -278,9 +299,81 @@ function latestIndexRowsById(indexRows: IndexRow[]): IndexRow[] {
   return [...latestRows.values()];
 }
 
+function tableExists(database: DatabaseSync, tableName: string): boolean {
+  return Boolean(
+    database
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
+      .get(tableName),
+  );
+}
+
+function catalogSessions(codexHome: string, fileRows: CodexSession[]): CodexSession[] | undefined {
+  const databasePath = getDesktopCatalogPath(codexHome);
+
+  if (!fs.existsSync(databasePath)) {
+    return undefined;
+  }
+
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+
+  try {
+    if (!tableExists(database, "local_thread_catalog")) {
+      return undefined;
+    }
+
+    const records = database
+      .prepare(
+        `SELECT thread_id AS id,
+                display_title AS title,
+                MAX(source_recency_at, source_updated_at, source_created_at) AS updated_at
+           FROM local_thread_catalog
+          WHERE host_id = 'local' AND missing_candidate = 0
+          ORDER BY updated_at DESC, thread_id DESC`,
+      )
+      .all() as unknown as Array<{ id: string; title: string; updated_at: number }>;
+    const filesById = new Map(fileRows.map((session) => [session.id, session]));
+    const latestRecords = new Map<string, CatalogRecord>();
+
+    for (const record of records) {
+      if (latestRecords.has(record.id)) {
+        continue;
+      }
+
+      latestRecords.set(record.id, {
+        id: record.id,
+        title: record.title || "(untitled)",
+        updatedAt: new Date(record.updated_at * 1000).toISOString(),
+      });
+    }
+
+    return [...latestRecords.values()].map((record) => {
+      const fileSession = filesById.get(record.id);
+      return {
+        id: record.id,
+        title: record.title,
+        updatedAt: record.updatedAt,
+        location: "active",
+        filePaths: fileSession?.filePaths ?? [],
+        fromIndex: false,
+        fromCatalog: true,
+      };
+    });
+  } finally {
+    database.close();
+  }
+}
+
 export function listSessions(codexHome = defaultCodexHome()): CodexSession[] {
-  const indexRows = latestIndexRowsById(readIndexRows(codexHome));
   const fileRows = scanSessionFiles(codexHome);
+  const desktopSessions = catalogSessions(codexHome, fileRows);
+
+  // The Desktop catalog is the source that backs the visible Codex thread list.
+  // Only fall back to the legacy index/file merge on older installations.
+  if (desktopSessions !== undefined) {
+    return desktopSessions;
+  }
+
+  const indexRows = latestIndexRowsById(readIndexRows(codexHome));
   const filesById = new Map(fileRows.map((session) => [session.id, session]));
   const seenIds = new Set<string>();
   const sessions: CodexSession[] = [];
@@ -308,6 +401,236 @@ export function listSessions(codexHome = defaultCodexHome()): CodexSession[] {
   }
 
   return sessions.sort((left, right) => sortSessionTime(right) - sortSessionTime(left));
+}
+
+function backupStamp(): string {
+  return new Date().toISOString().replace(/[-:.TZ]/g, "");
+}
+
+function backupDatabase(database: DatabaseSync, databasePath: string): string {
+  const backupPath = `${databasePath}.bak-${backupStamp()}`;
+  database.prepare("VACUUM INTO ?").run(backupPath);
+  return backupPath;
+}
+
+function removeDesktopCatalogEntries(
+  selectedIds: Set<string>,
+  codexHome: string,
+): {
+  removed: number;
+  backupPath?: string;
+} {
+  const databasePath = getDesktopCatalogPath(codexHome);
+
+  if (!fs.existsSync(databasePath)) {
+    return { removed: 0 };
+  }
+
+  const database = new DatabaseSync(databasePath);
+
+  try {
+    if (!tableExists(database, "local_thread_catalog")) {
+      return { removed: 0 };
+    }
+
+    const ids = [...selectedIds];
+    const placeholders = ids.map(() => "?").join(", ");
+    const count = Number(
+      (
+        database
+          .prepare(
+            `SELECT COUNT(*) AS count
+               FROM local_thread_catalog
+              WHERE host_id = 'local' AND thread_id IN (${placeholders})`,
+          )
+          .get(...ids) as { count: number }
+      ).count,
+    );
+
+    if (count === 0) {
+      return { removed: 0 };
+    }
+
+    const backupPath = backupDatabase(database, databasePath);
+    database.exec("BEGIN IMMEDIATE");
+
+    try {
+      if (tableExists(database, "thread_timeline_ledger")) {
+        database
+          .prepare(
+            `DELETE FROM thread_timeline_ledger
+              WHERE host_id = 'local' AND thread_id IN (${placeholders})`,
+          )
+          .run(...ids);
+      }
+
+      database
+        .prepare(
+          `DELETE FROM local_thread_catalog
+            WHERE host_id = 'local' AND thread_id IN (${placeholders})`,
+        )
+        .run(...ids);
+
+      if (tableExists(database, "local_thread_catalog_metadata")) {
+        database.exec(
+          "UPDATE local_thread_catalog_metadata SET catalog_revision = catalog_revision + 1",
+        );
+      }
+
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+
+    return { removed: count, backupPath };
+  } finally {
+    database.close();
+  }
+}
+
+function removeStateDatabaseEntries(
+  selectedIds: Set<string>,
+  codexHome: string,
+): {
+  removed: number;
+  backupPath?: string;
+} {
+  const databasePath = getStateDatabasePath(codexHome);
+
+  if (!fs.existsSync(databasePath)) {
+    return { removed: 0 };
+  }
+
+  const database = new DatabaseSync(databasePath);
+
+  try {
+    if (!tableExists(database, "threads")) {
+      return { removed: 0 };
+    }
+
+    const ids = [...selectedIds];
+    const placeholders = ids.map(() => "?").join(", ");
+    const count = Number(
+      (
+        database
+          .prepare(`SELECT COUNT(*) AS count FROM threads WHERE id IN (${placeholders})`)
+          .get(...ids) as { count: number }
+      ).count,
+    );
+
+    if (count === 0) {
+      return { removed: 0 };
+    }
+
+    const backupPath = backupDatabase(database, databasePath);
+    database.exec("BEGIN IMMEDIATE");
+
+    try {
+      if (tableExists(database, "thread_dynamic_tools")) {
+        database
+          .prepare(`DELETE FROM thread_dynamic_tools WHERE thread_id IN (${placeholders})`)
+          .run(...ids);
+      }
+
+      if (tableExists(database, "thread_spawn_edges")) {
+        database
+          .prepare(
+            `DELETE FROM thread_spawn_edges
+              WHERE parent_thread_id IN (${placeholders}) OR child_thread_id IN (${placeholders})`,
+          )
+          .run(...ids, ...ids);
+      }
+
+      database.prepare(`DELETE FROM threads WHERE id IN (${placeholders})`).run(...ids);
+      database.exec("COMMIT");
+    } catch (error) {
+      database.exec("ROLLBACK");
+      throw error;
+    }
+
+    return { removed: count, backupPath };
+  } finally {
+    database.close();
+  }
+}
+
+function referencesSelectedId(value: unknown, selectedIds: Set<string>): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+
+  return [value.id, value.threadId, value.thread_id].some(
+    (candidate) => typeof candidate === "string" && selectedIds.has(candidate),
+  );
+}
+
+function purgeStateReferences(value: unknown, selectedIds: Set<string>): number {
+  let removed = 0;
+
+  if (Array.isArray(value)) {
+    for (let index = value.length - 1; index >= 0; index -= 1) {
+      const item = value[index];
+
+      if (
+        (typeof item === "string" && selectedIds.has(item)) ||
+        referencesSelectedId(item, selectedIds)
+      ) {
+        value.splice(index, 1);
+        removed += 1;
+      } else {
+        removed += purgeStateReferences(item, selectedIds);
+      }
+    }
+
+    return removed;
+  }
+
+  if (!isRecord(value)) {
+    return removed;
+  }
+
+  for (const [key, item] of Object.entries(value)) {
+    if (
+      [...selectedIds].some((id) => key.includes(id)) ||
+      referencesSelectedId(item, selectedIds)
+    ) {
+      delete value[key];
+      removed += 1;
+    } else {
+      removed += purgeStateReferences(item, selectedIds);
+    }
+  }
+
+  return removed;
+}
+
+function removeGlobalStateReferences(
+  selectedIds: Set<string>,
+  codexHome: string,
+): {
+  removed: number;
+  backupPath?: string;
+} {
+  const statePath = path.join(codexHome, ".codex-global-state.json");
+
+  if (!fs.existsSync(statePath)) {
+    return { removed: 0 };
+  }
+
+  const state = JSON.parse(fs.readFileSync(statePath, "utf8")) as unknown;
+  const removed = purgeStateReferences(state, selectedIds);
+
+  if (removed === 0) {
+    return { removed: 0 };
+  }
+
+  const backupPath = `${statePath}.bak-${backupStamp()}`;
+  const tmpPath = `${statePath}.tmp`;
+  fs.copyFileSync(statePath, backupPath);
+  fs.writeFileSync(tmpPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+  fs.renameSync(tmpPath, statePath);
+  return { removed, backupPath };
 }
 
 export function shortTime(value: string): string {
@@ -374,8 +697,7 @@ export function deleteSessions(
   let backupPath: string | undefined;
 
   if (removedIndexEntries > 0 && fs.existsSync(indexPath)) {
-    const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..+$/, "");
-    backupPath = path.join(path.dirname(indexPath), `session_index.jsonl.bak-${stamp}`);
+    backupPath = path.join(path.dirname(indexPath), `session_index.jsonl.bak-${backupStamp()}`);
     fs.copyFileSync(indexPath, backupPath);
 
     const tmpPath = `${indexPath}.tmp`;
@@ -387,6 +709,15 @@ export function deleteSessions(
     );
     fs.renameSync(tmpPath, indexPath);
   }
+
+  const catalogResult = removeDesktopCatalogEntries(selectedIds, codexHome);
+  const stateDatabaseResult = removeStateDatabaseEntries(selectedIds, codexHome);
+  const globalStateResult = removeGlobalStateReferences(selectedIds, codexHome);
+  const additionalBackupPaths = [
+    catalogResult.backupPath,
+    stateDatabaseResult.backupPath,
+    globalStateResult.backupPath,
+  ].filter((value): value is string => Boolean(value));
 
   let deletedFiles = 0;
 
@@ -406,5 +737,12 @@ export function deleteSessions(
     }
   }
 
-  return { deletedFiles, removedIndexEntries, backupPath };
+  return {
+    deletedFiles,
+    removedIndexEntries,
+    removedDatabaseEntries: catalogResult.removed + stateDatabaseResult.removed,
+    removedStateReferences: globalStateResult.removed,
+    backupPath,
+    additionalBackupPaths,
+  };
 }

@@ -1,10 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import process from "node:process";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { parseNumberSelection } from "../dist/output/prompt.js";
-import { sessionIdFromPath } from "../dist/services/sessions.js";
+import { deleteSessions, listSessions, sessionIdFromPath } from "../dist/services/sessions.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const builtCliPath = "./dist/cli/index.js";
@@ -56,5 +59,110 @@ describe("cx CLI", () => {
         "/tmp/rollout-2026-01-01T00-00-00-000Z-550e8400-e29b-41d4-a716-446655440000.jsonl",
       ),
     ).toBe("550e8400-e29b-41d4-a716-446655440000");
+  });
+
+  test("lists the Desktop catalog and removes all persisted session state", () => {
+    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-s-test-"));
+    const sessionId = "550e8400-e29b-41d4-a716-446655440000";
+    const legacyOnlyId = "660e8400-e29b-41d4-a716-446655440000";
+    const sessionDir = path.join(codexHome, "sessions", "2026", "01", "01");
+    const catalogPath = path.join(codexHome, "sqlite", "codex-dev.db");
+    const statePath = path.join(codexHome, "state_5.sqlite");
+    const rolloutPath = path.join(sessionDir, `rollout-${sessionId}.jsonl`);
+
+    try {
+      fs.mkdirSync(path.dirname(catalogPath), { recursive: true });
+      fs.mkdirSync(sessionDir, { recursive: true });
+      fs.writeFileSync(
+        rolloutPath,
+        `${JSON.stringify({ type: "session_meta", payload: { id: sessionId } })}\n`,
+      );
+      fs.writeFileSync(
+        path.join(codexHome, "session_index.jsonl"),
+        `${JSON.stringify({ id: sessionId, thread_name: "old title" })}\n` +
+          `${JSON.stringify({ id: legacyOnlyId, thread_name: "not on Desktop" })}\n`,
+      );
+      fs.writeFileSync(
+        path.join(codexHome, ".codex-global-state.json"),
+        `${JSON.stringify({
+          "projectless-thread-ids": [sessionId],
+          "thread-project-assignments": { [sessionId]: { cwd: "/tmp" } },
+          "electron-persisted-atom-state": {
+            [`thread-client-id-v1:local%3A${sessionId}`]: "cached",
+          },
+        })}\n`,
+      );
+
+      const catalog = new DatabaseSync(catalogPath);
+      catalog.exec(`
+        CREATE TABLE local_thread_catalog (
+          host_id TEXT NOT NULL,
+          thread_id TEXT NOT NULL,
+          display_title TEXT NOT NULL,
+          source_created_at REAL NOT NULL,
+          source_updated_at REAL NOT NULL,
+          source_recency_at REAL NOT NULL,
+          missing_candidate INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (host_id, thread_id)
+        );
+        CREATE TABLE local_thread_catalog_metadata (
+          id INTEGER PRIMARY KEY,
+          catalog_revision INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE thread_timeline_ledger (
+          host_id TEXT NOT NULL,
+          thread_id TEXT NOT NULL,
+          sequence INTEGER NOT NULL
+        );
+        INSERT INTO local_thread_catalog VALUES
+          ('local', '${sessionId}', 'Desktop title', 10, 20, 30, 0);
+        INSERT INTO local_thread_catalog VALUES
+          ('remote', '${sessionId}', 'Remote copy', 40, 50, 60, 0);
+        INSERT INTO local_thread_catalog_metadata VALUES (1, 1);
+        INSERT INTO thread_timeline_ledger VALUES ('local', '${sessionId}', 1);
+      `);
+      catalog.close();
+
+      const state = new DatabaseSync(statePath);
+      state.exec(`
+        CREATE TABLE threads (id TEXT PRIMARY KEY);
+        CREATE TABLE thread_dynamic_tools (thread_id TEXT);
+        CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT);
+        INSERT INTO threads VALUES ('${sessionId}');
+        INSERT INTO thread_dynamic_tools VALUES ('${sessionId}');
+        INSERT INTO thread_spawn_edges VALUES ('${sessionId}', 'child');
+      `);
+      state.close();
+
+      const sessions = listSessions(codexHome);
+      expect(sessions.map((session) => session.id)).toEqual([sessionId]);
+      expect(sessions[0].title).toBe("Desktop title");
+      expect(sessions[0].fromCatalog).toBe(true);
+
+      const summary = deleteSessions(sessions, codexHome);
+      expect(summary.deletedFiles).toBe(1);
+      expect(summary.removedIndexEntries).toBe(1);
+      expect(summary.removedDatabaseEntries).toBe(2);
+      expect(summary.removedStateReferences).toBe(3);
+      expect(listSessions(codexHome)).toEqual([]);
+      expect(fs.existsSync(rolloutPath)).toBe(false);
+
+      const remainingIndex = fs.readFileSync(path.join(codexHome, "session_index.jsonl"), "utf8");
+      expect(remainingIndex).toContain(legacyOnlyId);
+      expect(remainingIndex).not.toContain(sessionId);
+      expect(
+        fs.readFileSync(path.join(codexHome, ".codex-global-state.json"), "utf8"),
+      ).not.toContain(sessionId);
+
+      const remainingCatalog = new DatabaseSync(catalogPath, { readOnly: true });
+      expect(
+        remainingCatalog
+          .prepare("SELECT COUNT(*) AS count FROM local_thread_catalog WHERE host_id = 'remote'")
+          .get(),
+      ).toEqual({ count: 1 });
+      remainingCatalog.close();
+    } finally {
+      fs.rmSync(codexHome, { recursive: true, force: true });
+    }
   });
 });
