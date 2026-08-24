@@ -2,7 +2,7 @@ import process from "node:process";
 import type { CommandModule } from "yargs";
 import { fail } from "../../lib/errors.js";
 import { sanitizeInline } from "../../output/format.js";
-import { requireDeleteConfirmation } from "../../output/prompt.js";
+import { confirm } from "../../output/prompt.js";
 import { formatTable } from "../../output/table.js";
 import { selectSessionIds } from "../session-picker.js";
 import {
@@ -57,7 +57,7 @@ export async function runDeleteCommand(
   process.stdout.write(`\nDelete ${selectedSessions.length} Codex session(s):\n\n`);
   process.stdout.write(renderDeletePlan(selectedSessions));
 
-  if (!(await requireDeleteConfirmation("\nType DELETE to confirm: "))) {
+  if (!(await confirm("\nDelete selected sessions? [y/N] "))) {
     fail("Cancelled.");
   }
 

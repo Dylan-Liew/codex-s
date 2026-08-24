@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test";
+import { describe, test } from "node:test";
+import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -12,7 +13,7 @@ import { deleteSessions, listSessions, sessionIdFromPath } from "../dist/service
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const builtCliPath = "./dist/cli/index.js";
 
-function runCli(args: string[]) {
+function runCli(args) {
   return spawnSync(process.execPath, [builtCliPath, ...args], {
     cwd: repoRoot,
     encoding: "utf8",
@@ -23,42 +24,43 @@ describe("cx CLI", () => {
   test("shows help output", () => {
     const result = runCli(["help"]);
 
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain("cx <command>");
-    expect(result.stdout).toContain("list");
-    expect(result.stdout).toContain("delete");
-    expect(result.stdout).toContain("config");
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /cx <command>/);
+    assert.match(result.stdout, /list/);
+    assert.match(result.stdout, /delete/);
+    assert.match(result.stdout, /config/);
   });
 
   test("prints fish completion script", () => {
     const result = runCli(["completion", "fish"]);
 
-    expect(result.status).toBe(0);
-    expect(result.stdout).toContain("complete -c cx -f");
-    expect(result.stdout).toContain("cx __complete");
+    assert.equal(result.status, 0);
+    assert.match(result.stdout, /complete -c cx -f/);
+    assert.match(result.stdout, /cx __complete/);
   });
 
   test("rejects unknown commands", () => {
     const result = runCli(["wat"]);
     const output = `${result.stdout}${result.stderr}`;
 
-    expect(result.status).not.toBe(0);
-    expect(output).toContain("Did you mean");
+    assert.notEqual(result.status, 0);
+    assert.match(output, /Did you mean/);
   });
 
   test("parses number selections", () => {
-    expect(parseNumberSelection("1,3,5-7", 8)).toEqual([0, 2, 4, 5, 6]);
-    expect(parseNumberSelection("", 8)).toBeNull();
-    expect(parseNumberSelection("2-1", 8)).toBeNull();
-    expect(parseNumberSelection("9", 8)).toBeNull();
+    assert.deepEqual(parseNumberSelection("1,3,5-7", 8), [0, 2, 4, 5, 6]);
+    assert.equal(parseNumberSelection("", 8), null);
+    assert.equal(parseNumberSelection("2-1", 8), null);
+    assert.equal(parseNumberSelection("9", 8), null);
   });
 
   test("extracts Codex session IDs from filenames", () => {
-    expect(
+    assert.equal(
       sessionIdFromPath(
         "/tmp/rollout-2026-01-01T00-00-00-000Z-550e8400-e29b-41d4-a716-446655440000.jsonl",
       ),
-    ).toBe("550e8400-e29b-41d4-a716-446655440000");
+      "550e8400-e29b-41d4-a716-446655440000",
+    );
   });
 
   test("lists the Desktop catalog and removes all persisted session state", () => {
@@ -135,31 +137,34 @@ describe("cx CLI", () => {
       state.close();
 
       const sessions = listSessions(codexHome);
-      expect(sessions.map((session) => session.id)).toEqual([sessionId]);
-      expect(sessions[0].title).toBe("Desktop title");
-      expect(sessions[0].fromCatalog).toBe(true);
+      assert.deepEqual(
+        sessions.map((session) => session.id),
+        [sessionId],
+      );
+      assert.equal(sessions[0].title, "Desktop title");
+      assert.equal(sessions[0].fromCatalog, true);
 
       const summary = deleteSessions(sessions, codexHome);
-      expect(summary.deletedFiles).toBe(1);
-      expect(summary.removedIndexEntries).toBe(1);
-      expect(summary.removedDatabaseEntries).toBe(2);
-      expect(summary.removedStateReferences).toBe(3);
-      expect(listSessions(codexHome)).toEqual([]);
-      expect(fs.existsSync(rolloutPath)).toBe(false);
+      assert.equal(summary.deletedFiles, 1);
+      assert.equal(summary.removedIndexEntries, 1);
+      assert.equal(summary.removedDatabaseEntries, 2);
+      assert.equal(summary.removedStateReferences, 3);
+      assert.deepEqual(listSessions(codexHome), []);
+      assert.equal(fs.existsSync(rolloutPath), false);
 
       const remainingIndex = fs.readFileSync(path.join(codexHome, "session_index.jsonl"), "utf8");
-      expect(remainingIndex).toContain(legacyOnlyId);
-      expect(remainingIndex).not.toContain(sessionId);
-      expect(
+      assert.match(remainingIndex, new RegExp(legacyOnlyId));
+      assert.doesNotMatch(remainingIndex, new RegExp(sessionId));
+      assert.doesNotMatch(
         fs.readFileSync(path.join(codexHome, ".codex-global-state.json"), "utf8"),
-      ).not.toContain(sessionId);
+        new RegExp(sessionId),
+      );
 
       const remainingCatalog = new DatabaseSync(catalogPath, { readOnly: true });
-      expect(
-        remainingCatalog
-          .prepare("SELECT COUNT(*) AS count FROM local_thread_catalog WHERE host_id = 'remote'")
-          .get(),
-      ).toEqual({ count: 1 });
+      const remainingRemoteRows = remainingCatalog
+        .prepare("SELECT COUNT(*) AS count FROM local_thread_catalog WHERE host_id = 'remote'")
+        .get();
+      assert.equal(remainingRemoteRows.count, 1);
       remainingCatalog.close();
     } finally {
       fs.rmSync(codexHome, { recursive: true, force: true });

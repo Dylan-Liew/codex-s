@@ -2,13 +2,13 @@
 
 `codex-s` installs the `cx` CLI, a small tool for listing and deleting local Codex sessions.
 
-It reads the same local thread catalog used by Codex Desktop, supports interactive multi-select deletion, and requires typing `DELETE` before it removes matching session files, database rows, and cached Desktop state.
+It reads the same local thread catalog used by Codex Desktop, supports interactive multi-select deletion, and asks for `y/N` confirmation before it removes matching session files, database rows, and cached Desktop state.
 
 ## Requirements
 
-- Node.js `>=24` or Bun `>=1.1.0`
+- Node.js `>=24`
 
-`codex-s` can be installed with npm or Bun. The default `cx` binary runs on Node.js. A Bun-specific binary is also exposed as `cx-bun` for users who want to run the same CLI under Bun.
+`codex-s` runs on Node.js because it uses Node's runtime-native SQLite support to read the same local catalog used by Codex Desktop.
 
 ## Install
 
@@ -18,25 +18,18 @@ From npm:
 npm install -g codex-s
 ```
 
-From Bun:
-
-```bash
-bun add -g codex-s
-```
-
 For local development from this repository:
 
 ```bash
-bun install
-bun link
+npm install
+npm link
 ```
 
 You can also run the built CLI directly:
 
 ```bash
-bun run build
+npm run build
 node ./dist/cli/index.js list
-bun ./dist/cli/index.js list
 ```
 
 ## Usage
