@@ -326,9 +326,20 @@ function catalogSessions(codexHome: string, fileRows: CodexSession[]): CodexSess
         `SELECT thread_id AS id,
                 display_title AS title,
                 MAX(source_recency_at, source_updated_at, source_created_at) AS updated_at
-           FROM local_thread_catalog
-          WHERE host_id = 'local' AND missing_candidate = 0
-          ORDER BY updated_at DESC, thread_id DESC`,
+           FROM (
+             SELECT *,
+                    ROW_NUMBER() OVER (
+                      PARTITION BY thread_id
+                      ORDER BY source_recency_at DESC,
+                               source_updated_at DESC,
+                               source_created_at DESC,
+                               host_id DESC
+                    ) AS row_number
+               FROM local_thread_catalog
+              WHERE missing_candidate = 0
+           )
+          WHERE row_number = 1
+          ORDER BY updated_at DESC, id DESC`,
       )
       .all() as unknown as Array<{ id: string; title: string; updated_at: number }>;
     const filesById = new Map(fileRows.map((session) => [session.id, session]));
@@ -366,19 +377,25 @@ function catalogSessions(codexHome: string, fileRows: CodexSession[]): CodexSess
 export function listSessions(codexHome = defaultCodexHome()): CodexSession[] {
   const fileRows = scanSessionFiles(codexHome);
   const desktopSessions = catalogSessions(codexHome, fileRows);
-
-  // The Desktop catalog is the source that backs the visible Codex thread list.
-  // Only fall back to the legacy index/file merge on older installations.
-  if (desktopSessions !== undefined) {
-    return desktopSessions;
-  }
-
   const indexRows = latestIndexRowsById(readIndexRows(codexHome));
   const filesById = new Map(fileRows.map((session) => [session.id, session]));
   const seenIds = new Set<string>();
   const sessions: CodexSession[] = [];
 
+  // The Desktop catalog backs the visible thread list, but recent Codex builds can
+  // also keep local-only sessions in state/index/files before the catalog catches up.
+  if (desktopSessions !== undefined) {
+    for (const session of desktopSessions) {
+      seenIds.add(session.id);
+      sessions.push(session);
+    }
+  }
+
   for (const row of indexRows) {
+    if (seenIds.has(row.session.id)) {
+      continue;
+    }
+
     const fileSession = filesById.get(row.session.id);
     const mergedSession = fileSession
       ? {
@@ -441,7 +458,7 @@ function removeDesktopCatalogEntries(
           .prepare(
             `SELECT COUNT(*) AS count
                FROM local_thread_catalog
-              WHERE host_id = 'local' AND thread_id IN (${placeholders})`,
+              WHERE thread_id IN (${placeholders})`,
           )
           .get(...ids) as { count: number }
       ).count,
@@ -459,7 +476,7 @@ function removeDesktopCatalogEntries(
         database
           .prepare(
             `DELETE FROM thread_timeline_ledger
-              WHERE host_id = 'local' AND thread_id IN (${placeholders})`,
+              WHERE thread_id IN (${placeholders})`,
           )
           .run(...ids);
       }
@@ -467,7 +484,7 @@ function removeDesktopCatalogEntries(
       database
         .prepare(
           `DELETE FROM local_thread_catalog
-            WHERE host_id = 'local' AND thread_id IN (${placeholders})`,
+            WHERE thread_id IN (${placeholders})`,
         )
         .run(...ids);
 

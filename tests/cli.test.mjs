@@ -67,10 +67,12 @@ describe("cx CLI", () => {
     const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-s-test-"));
     const sessionId = "550e8400-e29b-41d4-a716-446655440000";
     const legacyOnlyId = "660e8400-e29b-41d4-a716-446655440000";
+    const fileOnlyId = "770e8400-e29b-41d4-a716-446655440000";
     const sessionDir = path.join(codexHome, "sessions", "2026", "01", "01");
     const catalogPath = path.join(codexHome, "sqlite", "codex-dev.db");
     const statePath = path.join(codexHome, "state_5.sqlite");
     const rolloutPath = path.join(sessionDir, `rollout-${sessionId}.jsonl`);
+    const fileOnlyPath = path.join(sessionDir, `rollout-${fileOnlyId}.jsonl`);
 
     try {
       fs.mkdirSync(path.dirname(catalogPath), { recursive: true });
@@ -78,6 +80,10 @@ describe("cx CLI", () => {
       fs.writeFileSync(
         rolloutPath,
         `${JSON.stringify({ type: "session_meta", payload: { id: sessionId } })}\n`,
+      );
+      fs.writeFileSync(
+        fileOnlyPath,
+        `${JSON.stringify({ type: "session_meta", payload: { id: fileOnlyId } })}\n`,
       );
       fs.writeFileSync(
         path.join(codexHome, "session_index.jsonl"),
@@ -117,11 +123,12 @@ describe("cx CLI", () => {
           sequence INTEGER NOT NULL
         );
         INSERT INTO local_thread_catalog VALUES
-          ('local', '${sessionId}', 'Desktop title', 10, 20, 30, 0);
+          ('chatgpt:account:user', '${sessionId}', 'Desktop title', 10, 20, 30, 0);
         INSERT INTO local_thread_catalog VALUES
           ('remote', '${sessionId}', 'Remote copy', 40, 50, 60, 0);
         INSERT INTO local_thread_catalog_metadata VALUES (1, 1);
-        INSERT INTO thread_timeline_ledger VALUES ('local', '${sessionId}', 1);
+        INSERT INTO thread_timeline_ledger VALUES ('chatgpt:account:user', '${sessionId}', 1);
+        INSERT INTO thread_timeline_ledger VALUES ('remote', '${sessionId}', 2);
       `);
       catalog.close();
 
@@ -138,19 +145,27 @@ describe("cx CLI", () => {
 
       const sessions = listSessions(codexHome);
       assert.deepEqual(
-        sessions.map((session) => session.id),
-        [sessionId],
+        sessions.map((session) => session.id).sort(),
+        [fileOnlyId, legacyOnlyId, sessionId].sort(),
       );
-      assert.equal(sessions[0].title, "Desktop title");
-      assert.equal(sessions[0].fromCatalog, true);
+      const catalogSession = sessions.find((session) => session.id === sessionId);
+      assert.ok(catalogSession);
+      assert.equal(catalogSession?.title, "Remote copy");
+      assert.equal(catalogSession?.fromCatalog, true);
 
-      const summary = deleteSessions(sessions, codexHome);
+      const summary = deleteSessions([catalogSession], codexHome);
       assert.equal(summary.deletedFiles, 1);
       assert.equal(summary.removedIndexEntries, 1);
-      assert.equal(summary.removedDatabaseEntries, 2);
+      assert.equal(summary.removedDatabaseEntries, 3);
       assert.equal(summary.removedStateReferences, 3);
-      assert.deepEqual(listSessions(codexHome), []);
+      assert.deepEqual(
+        listSessions(codexHome)
+          .map((session) => session.id)
+          .sort(),
+        [legacyOnlyId, fileOnlyId].sort(),
+      );
       assert.equal(fs.existsSync(rolloutPath), false);
+      assert.equal(fs.existsSync(fileOnlyPath), true);
 
       const remainingIndex = fs.readFileSync(path.join(codexHome, "session_index.jsonl"), "utf8");
       assert.match(remainingIndex, new RegExp(legacyOnlyId));
@@ -161,10 +176,14 @@ describe("cx CLI", () => {
       );
 
       const remainingCatalog = new DatabaseSync(catalogPath, { readOnly: true });
-      const remainingRemoteRows = remainingCatalog
-        .prepare("SELECT COUNT(*) AS count FROM local_thread_catalog WHERE host_id = 'remote'")
-        .get();
-      assert.equal(remainingRemoteRows.count, 1);
+      const remainingRows = remainingCatalog
+        .prepare("SELECT COUNT(*) AS count FROM local_thread_catalog WHERE thread_id = ?")
+        .get(sessionId);
+      const remainingLedgerRows = remainingCatalog
+        .prepare("SELECT COUNT(*) AS count FROM thread_timeline_ledger WHERE thread_id = ?")
+        .get(sessionId);
+      assert.equal(remainingRows.count, 0);
+      assert.equal(remainingLedgerRows.count, 0);
       remainingCatalog.close();
     } finally {
       fs.rmSync(codexHome, { recursive: true, force: true });
