@@ -63,6 +63,46 @@ describe("cx CLI", () => {
     );
   });
 
+  test("groups list output by normalized catalog host", () => {
+    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-s-list-test-"));
+    const catalogPath = path.join(codexHome, "sqlite", "codex-dev.db");
+
+    try {
+      fs.mkdirSync(path.dirname(catalogPath), { recursive: true });
+
+      const catalog = new DatabaseSync(catalogPath);
+      catalog.exec(`
+        CREATE TABLE local_thread_catalog (
+          host_id TEXT NOT NULL,
+          thread_id TEXT NOT NULL,
+          display_title TEXT NOT NULL,
+          source_created_at REAL NOT NULL,
+          source_updated_at REAL NOT NULL,
+          source_recency_at REAL NOT NULL,
+          missing_candidate INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (host_id, thread_id)
+        );
+        INSERT INTO local_thread_catalog VALUES
+          ('local', '550e8400-e29b-41d4-a716-446655440000', 'Local title', 10, 20, 30, 0),
+          ('remote-ssh-discovered:dojo', '660e8400-e29b-41d4-a716-446655440000', 'Dojo title', 20, 30, 40, 0),
+          ('chatgpt:account:user', '770e8400-e29b-41d4-a716-446655440000', 'ChatGPT title', 30, 40, 50, 0);
+      `);
+      catalog.close();
+
+      const result = runCli(["--home", codexHome, "list"]);
+
+      assert.equal(result.status, 0);
+      assert.match(result.stdout, /\nchatgpt\n/);
+      assert.match(result.stdout, /\ndojo\n/);
+      assert.match(result.stdout, /\nlocal\n/);
+      assert.match(result.stdout, /ChatGPT title/);
+      assert.match(result.stdout, /Dojo title/);
+      assert.match(result.stdout, /Local title/);
+    } finally {
+      fs.rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
   test("lists the Desktop catalog and removes all persisted session state", () => {
     const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-s-test-"));
     const sessionId = "550e8400-e29b-41d4-a716-446655440000";

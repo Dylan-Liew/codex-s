@@ -11,6 +11,7 @@ export interface CodexSession {
   title: string;
   updatedAt: string;
   location: "active" | "archived" | "missing";
+  hostLabel: string;
   filePaths: string[];
   fromIndex: boolean;
   fromCatalog: boolean;
@@ -35,6 +36,7 @@ interface CatalogRecord {
   id: string;
   title: string;
   updatedAt: string;
+  hostLabel: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -229,6 +231,7 @@ function readIndexRows(codexHome: string): IndexRow[] {
         title: typeof record.thread_name === "string" ? record.thread_name : "(untitled)",
         updatedAt: typeof record.updated_at === "string" ? record.updated_at : "",
         location: "missing",
+        hostLabel: "local",
         filePaths: [],
         fromIndex: true,
         fromCatalog: false,
@@ -260,6 +263,7 @@ function scanSessionFiles(codexHome: string): CodexSession[] {
       title: info.title,
       updatedAt: new Date(fs.statSync(filePath).mtimeMs).toISOString(),
       location: sessionLocation([filePath]),
+      hostLabel: "local",
       filePaths: [filePath],
       fromIndex: false,
       fromCatalog: false,
@@ -267,6 +271,22 @@ function scanSessionFiles(codexHome: string): CodexSession[] {
   }
 
   return sessions;
+}
+
+export function hostLabelFromId(hostId: string): string {
+  if (hostId === "local") {
+    return "local";
+  }
+
+  if (hostId.startsWith("remote-ssh-discovered:")) {
+    return hostId.slice("remote-ssh-discovered:".length) || hostId;
+  }
+
+  if (hostId.startsWith("chatgpt:")) {
+    return "chatgpt";
+  }
+
+  return hostId;
 }
 
 export function findSessionFiles(sessionId: string, codexHome = defaultCodexHome()): string[] {
@@ -324,6 +344,7 @@ function catalogSessions(codexHome: string, fileRows: CodexSession[]): CodexSess
     const records = database
       .prepare(
         `SELECT thread_id AS id,
+                host_id AS host_id,
                 display_title AS title,
                 MAX(source_recency_at, source_updated_at, source_created_at) AS updated_at
            FROM (
@@ -341,7 +362,7 @@ function catalogSessions(codexHome: string, fileRows: CodexSession[]): CodexSess
           WHERE row_number = 1
           ORDER BY updated_at DESC, id DESC`,
       )
-      .all() as unknown as Array<{ id: string; title: string; updated_at: number }>;
+      .all() as unknown as Array<{ id: string; host_id: string; title: string; updated_at: number }>;
     const filesById = new Map(fileRows.map((session) => [session.id, session]));
     const latestRecords = new Map<string, CatalogRecord>();
 
@@ -354,6 +375,7 @@ function catalogSessions(codexHome: string, fileRows: CodexSession[]): CodexSess
         id: record.id,
         title: record.title || "(untitled)",
         updatedAt: new Date(record.updated_at * 1000).toISOString(),
+        hostLabel: hostLabelFromId(record.host_id),
       });
     }
 
@@ -364,6 +386,7 @@ function catalogSessions(codexHome: string, fileRows: CodexSession[]): CodexSess
         title: record.title,
         updatedAt: record.updatedAt,
         location: "active",
+        hostLabel: record.hostLabel,
         filePaths: fileSession?.filePaths ?? [],
         fromIndex: false,
         fromCatalog: true,

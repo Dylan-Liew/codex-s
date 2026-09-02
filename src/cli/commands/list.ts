@@ -2,10 +2,26 @@ import process from "node:process";
 import type { CommandModule } from "yargs";
 import { sanitizeInline } from "../../output/format.js";
 import { formatTable } from "../../output/table.js";
-import { defaultCodexHome, listSessions, shortTime } from "../../services/sessions.js";
+import {
+  defaultCodexHome,
+  listSessions,
+  shortTime,
+  type CodexSession,
+} from "../../services/sessions.js";
 
 interface HomeArgv {
   home?: unknown;
+}
+
+function groupSessionsByHost(sessions: CodexSession[]): Map<string, CodexSession[]> {
+  const groups = new Map<string, CodexSession[]>();
+
+  for (const session of sessions) {
+    const label = session.hostLabel || "local";
+    groups.set(label, [...(groups.get(label) ?? []), session]);
+  }
+
+  return groups;
 }
 
 export function runListCommand(options: { home?: string } = {}): void {
@@ -18,17 +34,24 @@ export function runListCommand(options: { home?: string } = {}): void {
   }
 
   process.stdout.write(`Codex home: ${codexHome}\n\n`);
-  process.stdout.write(
-    formatTable(
-      ["id", "updated", "state", "title"],
-      sessions.map((session) => [
-        session.id.slice(0, 12),
-        shortTime(session.updatedAt),
-        session.location,
-        sanitizeInline(session.title),
-      ]),
-    ),
-  );
+
+  const groups = groupSessionsByHost(sessions);
+
+  for (const [hostLabel, hostSessions] of groups) {
+    process.stdout.write(`${hostLabel}\n`);
+    process.stdout.write(
+      formatTable(
+        ["id", "updated", "state", "title"],
+        hostSessions.map((session) => [
+          session.id.slice(0, 12),
+          shortTime(session.updatedAt),
+          session.location,
+          sanitizeInline(session.title),
+        ]),
+      ),
+    );
+    process.stdout.write("\n");
+  }
 }
 
 export const listCommand: CommandModule = {
