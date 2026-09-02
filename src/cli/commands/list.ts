@@ -38,7 +38,7 @@ export function runListCommand(options: { home?: string } = {}): void {
   const groups = groupSessionsByHost(sessions);
 
   for (const [hostLabel, hostSessions] of groups) {
-    process.stdout.write(`  ${hostLabel}\n`);
+    process.stdout.write(`[${hostLabel}]\n`);
     process.stdout.write(
       formatTable(
         ["id", "updated", "state", "title"],

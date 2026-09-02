@@ -92,9 +92,9 @@ describe("cx CLI", () => {
       const result = runCli(["--home", codexHome, "list"]);
 
       assert.equal(result.status, 0);
-      assert.match(result.stdout, /\n  chatgpt\n/);
-      assert.match(result.stdout, /\n  dojo\n/);
-      assert.match(result.stdout, /\n  local\n/);
+      assert.match(result.stdout, /\n\[chatgpt\]\n/);
+      assert.match(result.stdout, /\n\[dojo\]\n/);
+      assert.match(result.stdout, /\n\[local\]\n/);
       assert.match(result.stdout, /ChatGPT title/);
       assert.match(result.stdout, /Dojo title/);
       assert.match(result.stdout, /Local title/);
