@@ -61,6 +61,21 @@ To delete explicit sessions:
 cx delete 550e8400 "session title"
 ```
 
+To delete an entire host category (as shown by `cx list` group headings):
+
+```bash
+cx delete --host chatgpt
+cx delete --host local
+```
+
+To delete every session on every host:
+
+```bash
+cx delete --all
+```
+
+Host labels match the `[...]` group headings in `cx list`: `local`, `chatgpt`, or an SSH label such as `dojo`. Every bulk deletion still asks for `y/N` confirmation and shows the full plan first.
+
 ## Codex Home
 
 Codex home is resolved in this order:

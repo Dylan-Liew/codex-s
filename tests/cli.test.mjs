@@ -14,10 +14,11 @@ import { deleteSessions, listSessions, sessionIdFromPath } from "../dist/service
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const builtCliPath = "./dist/cli/index.js";
 
-function runCli(args) {
+function runCli(args, input) {
   return spawnSync(process.execPath, [builtCliPath, ...args], {
     cwd: repoRoot,
     encoding: "utf8",
+    input,
   });
 }
 
@@ -99,6 +100,55 @@ describe("cx CLI", () => {
       assert.match(result.stdout, /ChatGPT title/);
       assert.match(result.stdout, /Dojo title/);
       assert.match(result.stdout, /Local title/);
+    } finally {
+      fs.rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  test("deletes every session on one host with --host", () => {
+    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-s-host-test-"));
+    const catalogPath = path.join(codexHome, "sqlite", "codex-dev.db");
+    const chatgptId = "770e8400-e29b-41d4-a716-446655440000";
+    const localId = "550e8400-e29b-41d4-a716-446655440000";
+
+    try {
+      fs.mkdirSync(path.dirname(catalogPath), { recursive: true });
+
+      const catalog = new DatabaseSync(catalogPath);
+      catalog.exec(`
+        CREATE TABLE local_thread_catalog (
+          host_id TEXT NOT NULL,
+          thread_id TEXT NOT NULL,
+          display_title TEXT NOT NULL,
+          source_created_at REAL NOT NULL,
+          source_updated_at REAL NOT NULL,
+          source_recency_at REAL NOT NULL,
+          missing_candidate INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (host_id, thread_id)
+        );
+        INSERT INTO local_thread_catalog VALUES
+          ('chatgpt:account:user', '${chatgptId}', 'ChatGPT title', 30, 40, 50, 0),
+          ('local', '${localId}', 'Local title', 10, 20, 30, 0);
+      `);
+      catalog.close();
+
+      const rejected = runCli(["--home", codexHome, "delete", "--all", "--host", "chatgpt"]);
+      assert.notEqual(rejected.status, 0);
+      assert.match(`${rejected.stdout}${rejected.stderr}`, /Use either --all/);
+
+      const unknownHost = runCli(["--home", codexHome, "delete", "--host", "nope"]);
+      assert.notEqual(unknownHost.status, 0);
+      assert.match(`${unknownHost.stdout}${unknownHost.stderr}`, /No sessions found for host/);
+
+      const result = runCli(["--home", codexHome, "delete", "--host", "chatgpt"], "y\n");
+
+      assert.equal(result.status, 0);
+      assert.match(result.stdout, /\(host "chatgpt"\)/);
+      assert.match(result.stdout, /ChatGPT title/);
+      assert.doesNotMatch(result.stdout, /Local title/);
+
+      const remaining = listSessions(codexHome).map((session) => session.id);
+      assert.deepEqual(remaining, [localId]);
     } finally {
       fs.rmSync(codexHome, { recursive: true, force: true });
     }
