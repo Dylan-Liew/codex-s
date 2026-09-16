@@ -8,6 +8,7 @@ import process from "node:process";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { parseNumberSelection } from "../dist/output/prompt.js";
+import { cleanupCodexHome } from "../dist/services/cleanup.js";
 import { deleteSessions, listSessions, sessionIdFromPath } from "../dist/services/sessions.js";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -177,11 +178,28 @@ describe("cx CLI", () => {
         CREATE TABLE threads (id TEXT PRIMARY KEY);
         CREATE TABLE thread_dynamic_tools (thread_id TEXT);
         CREATE TABLE thread_spawn_edges (parent_thread_id TEXT, child_thread_id TEXT);
+        CREATE TABLE thread_artifacts (id TEXT PRIMARY KEY, thread_id TEXT);
         INSERT INTO threads VALUES ('${sessionId}');
         INSERT INTO thread_dynamic_tools VALUES ('${sessionId}');
         INSERT INTO thread_spawn_edges VALUES ('${sessionId}', 'child');
+        INSERT INTO thread_artifacts VALUES ('artifact-1', '${sessionId}');
       `);
       state.close();
+
+      const queuePath = path.join(codexHome, "queue_1.sqlite");
+      const queue = new DatabaseSync(queuePath);
+      queue.exec(`
+        CREATE TABLE queued_items (id INTEGER PRIMARY KEY, thread_id TEXT);
+        INSERT INTO queued_items (thread_id) VALUES ('${sessionId}');
+        INSERT INTO queued_items (thread_id) VALUES ('${fileOnlyId}');
+      `);
+      queue.close();
+
+      fs.writeFileSync(
+        path.join(codexHome, "history.jsonl"),
+        `${JSON.stringify({ session_id: sessionId, ts: 1, text: "bye" })}\n` +
+          `${JSON.stringify({ session_id: fileOnlyId, ts: 2, text: "keep" })}\n`,
+      );
 
       const sessions = listSessions(codexHome);
       assert.deepEqual(
@@ -196,8 +214,9 @@ describe("cx CLI", () => {
       const summary = deleteSessions([catalogSession], codexHome);
       assert.equal(summary.deletedFiles, 1);
       assert.equal(summary.removedIndexEntries, 1);
-      assert.equal(summary.removedDatabaseEntries, 3);
+      assert.equal(summary.removedDatabaseEntries, 7);
       assert.equal(summary.removedStateReferences, 3);
+      assert.equal(summary.removedHistoryEntries, 1);
       assert.deepEqual(
         listSessions(codexHome)
           .map((session) => session.id)
@@ -225,6 +244,74 @@ describe("cx CLI", () => {
       assert.equal(remainingRows.count, 0);
       assert.equal(remainingLedgerRows.count, 0);
       remainingCatalog.close();
+
+      const remainingQueue = new DatabaseSync(queuePath, { readOnly: true });
+      const remainingQueueRows = remainingQueue
+        .prepare("SELECT thread_id FROM queued_items")
+        .all()
+        .map((row) => row.thread_id);
+      assert.deepEqual(remainingQueueRows, [fileOnlyId]);
+      remainingQueue.close();
+
+      const remainingHistory = fs.readFileSync(path.join(codexHome, "history.jsonl"), "utf8");
+      assert.match(remainingHistory, new RegExp(fileOnlyId));
+      assert.doesNotMatch(remainingHistory, new RegExp(sessionId));
+    } finally {
+      fs.rmSync(codexHome, { recursive: true, force: true });
+    }
+  });
+
+  test("cleans temp files and orphaned session data", () => {
+    const codexHome = fs.mkdtempSync(path.join(os.tmpdir(), "codex-s-cleanup-test-"));
+    const validId = "550e8400-e29b-41d4-a716-446655440000";
+    const orphanId = "660e8400-e29b-41d4-a716-446655440000";
+    const statePath = path.join(codexHome, "state_5.sqlite");
+    const queuePath = path.join(codexHome, "queue_1.sqlite");
+
+    try {
+      const state = new DatabaseSync(statePath);
+      state.exec(`
+        CREATE TABLE threads (id TEXT PRIMARY KEY);
+        INSERT INTO threads VALUES ('${validId}');
+      `);
+      state.close();
+
+      const queue = new DatabaseSync(queuePath);
+      queue.exec(`
+        CREATE TABLE queued_items (id INTEGER PRIMARY KEY, thread_id TEXT);
+        INSERT INTO queued_items (thread_id) VALUES ('${validId}');
+        INSERT INTO queued_items (thread_id) VALUES ('${orphanId}');
+      `);
+      queue.close();
+
+      fs.writeFileSync(
+        path.join(codexHome, "history.jsonl"),
+        `${JSON.stringify({ session_id: validId, ts: 1, text: "keep" })}\n` +
+          `${JSON.stringify({ session_id: orphanId, ts: 2, text: "drop" })}\n`,
+      );
+      fs.writeFileSync(path.join(codexHome, ".codex-global-state.json"), "{}");
+      fs.writeFileSync(path.join(codexHome, "..codex-global-state.json.tmp-1789-abc"), "{}");
+      fs.writeFileSync(path.join(codexHome, ".codex-global-state.json.tmp"), "{}");
+      fs.writeFileSync(path.join(codexHome, "session_index.jsonl.tmp"), "{}");
+
+      const summary = cleanupCodexHome(codexHome);
+
+      assert.equal(summary.removedTempFiles.length, 3);
+      assert.equal(summary.removedOrphanDatabaseRows, 1);
+      assert.equal(summary.removedOrphanHistoryEntries, 1);
+      assert.equal(fs.existsSync(path.join(codexHome, ".codex-global-state.json")), true);
+
+      const remainingQueue = new DatabaseSync(queuePath, { readOnly: true });
+      const remainingQueueRows = remainingQueue
+        .prepare("SELECT thread_id FROM queued_items")
+        .all()
+        .map((row) => row.thread_id);
+      assert.deepEqual(remainingQueueRows, [validId]);
+      remainingQueue.close();
+
+      const remainingHistory = fs.readFileSync(path.join(codexHome, "history.jsonl"), "utf8");
+      assert.match(remainingHistory, new RegExp(validId));
+      assert.doesNotMatch(remainingHistory, new RegExp(orphanId));
     } finally {
       fs.rmSync(codexHome, { recursive: true, force: true });
     }

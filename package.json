@@ -1,6 +1,6 @@
 {
   "name": "codex-s",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "A CLI for listing and deleting local Codex sessions.",
   "type": "module",
   "bin": {

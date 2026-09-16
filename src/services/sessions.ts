@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fail } from "../lib/errors.js";
@@ -28,9 +29,15 @@ export interface DeleteSummary {
   removedIndexEntries: number;
   removedDatabaseEntries: number;
   removedStateReferences: number;
+  removedHistoryEntries: number;
   backupPath?: string;
   additionalBackupPaths: string[];
 }
+
+export type ThreadKeyedTable = {
+  name: string;
+  kind: "id" | "thread_id" | "spawn";
+};
 
 interface CatalogRecord {
   id: string;
@@ -57,6 +64,17 @@ export function getDesktopCatalogPath(codexHome = defaultCodexHome()): string {
 
 export function getStateDatabasePath(codexHome = defaultCodexHome()): string {
   return path.join(codexHome, "state_5.sqlite");
+}
+
+const THREAD_DATABASE_FILES = [
+  "state_5.sqlite",
+  "goals_1.sqlite",
+  "memories_1.sqlite",
+  "queue_1.sqlite",
+];
+
+export function getThreadDatabasePaths(codexHome = defaultCodexHome()): string[] {
+  return THREAD_DATABASE_FILES.map((file) => path.join(codexHome, file));
 }
 
 function getSessionDirs(codexHome: string): string[] {
@@ -319,12 +337,140 @@ function latestIndexRowsById(indexRows: IndexRow[]): IndexRow[] {
   return [...latestRows.values()];
 }
 
-function tableExists(database: DatabaseSync, tableName: string): boolean {
+export function tableExists(database: DatabaseSync, tableName: string): boolean {
   return Boolean(
     database
       .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?")
       .get(tableName),
   );
+}
+
+export function threadKeyedTables(database: DatabaseSync): ThreadKeyedTable[] {
+  const tables = database
+    .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
+    .all() as Array<{ name: string }>;
+  const keyed: ThreadKeyedTable[] = [];
+
+  for (const { name } of tables) {
+    if (name.startsWith("sqlite_") || name.startsWith("_sqlx_")) {
+      continue;
+    }
+
+    const columns = (
+      database.prepare(`PRAGMA table_info('${name.replace(/'/g, "''")}')`).all() as Array<{
+        name: string;
+      }>
+    ).map((column) => column.name);
+
+    if (columns.includes("thread_id")) {
+      keyed.push({ name, kind: "thread_id" });
+    } else if (columns.includes("parent_thread_id") || columns.includes("child_thread_id")) {
+      keyed.push({ name, kind: "spawn" });
+    } else if (name === "threads" && columns.includes("id")) {
+      keyed.push({ name, kind: "id" });
+    }
+  }
+
+  return keyed;
+}
+
+function threadRowWhere(table: ThreadKeyedTable, idCount: number): string {
+  const placeholders = Array.from({ length: idCount }, () => "?").join(", ");
+
+  if (table.kind === "id") {
+    return `id IN (${placeholders})`;
+  }
+
+  if (table.kind === "spawn") {
+    return `parent_thread_id IN (${placeholders}) OR child_thread_id IN (${placeholders})`;
+  }
+
+  return `thread_id IN (${placeholders})`;
+}
+
+function threadRowParams(table: ThreadKeyedTable, ids: string[]): string[] {
+  return table.kind === "spawn" ? [...ids, ...ids] : ids;
+}
+
+function countThreadRows(
+  database: DatabaseSync,
+  tables: ThreadKeyedTable[],
+  ids: string[],
+): number {
+  let count = 0;
+
+  for (const table of tables) {
+    const row = database
+      .prepare(
+        `SELECT COUNT(*) AS count FROM "${table.name}" WHERE ${threadRowWhere(table, ids.length)}`,
+      )
+      .get(...threadRowParams(table, ids)) as { count: number };
+    count += Number(row.count);
+  }
+
+  return count;
+}
+
+function deleteThreadRows(
+  database: DatabaseSync,
+  tables: ThreadKeyedTable[],
+  ids: string[],
+): number {
+  let removed = 0;
+
+  for (const table of tables) {
+    const result = database
+      .prepare(`DELETE FROM "${table.name}" WHERE ${threadRowWhere(table, ids.length)}`)
+      .run(...threadRowParams(table, ids));
+    removed += Number(result.changes);
+  }
+
+  return removed;
+}
+
+export function readFromSqliteSnapshot<T>(
+  databasePath: string,
+  read: (database: DatabaseSync) => T,
+): T {
+  try {
+    const database = new DatabaseSync(databasePath, { readOnly: true });
+
+    try {
+      return read(database);
+    } finally {
+      database.close();
+    }
+  } catch (error) {
+    // WAL sidecars on network/DrvFS mounts can make direct reads fail with
+    // disk I/O errors; retry against a point-in-time copy in a temp directory.
+    if (!isRecord(error) || error.code !== "ERR_SQLITE_ERROR") {
+      throw error;
+    }
+  }
+
+  const snapshotDir = fs.mkdtempSync(path.join(tmpdir(), "codex-s-snapshot-"));
+
+  try {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      const sidecarPath = `${databasePath}${suffix}`;
+
+      if (fs.existsSync(sidecarPath)) {
+        fs.copyFileSync(sidecarPath, path.join(snapshotDir, path.basename(sidecarPath)));
+      }
+    }
+
+    const database = new DatabaseSync(path.join(snapshotDir, path.basename(databasePath)), {
+      readOnly: true,
+    });
+
+    try {
+      return read(database);
+    } finally {
+      database.close();
+    }
+  } finally {
+    fs.rmSync(snapshotDir, { recursive: true, force: true });
+  }
 }
 
 function catalogSessions(codexHome: string, fileRows: CodexSession[]): CodexSession[] | undefined {
@@ -334,9 +480,7 @@ function catalogSessions(codexHome: string, fileRows: CodexSession[]): CodexSess
     return undefined;
   }
 
-  const database = new DatabaseSync(databasePath, { readOnly: true });
-
-  try {
+  return readFromSqliteSnapshot(databasePath, (database) => {
     if (!tableExists(database, "local_thread_catalog")) {
       return undefined;
     }
@@ -362,7 +506,12 @@ function catalogSessions(codexHome: string, fileRows: CodexSession[]): CodexSess
           WHERE row_number = 1
           ORDER BY updated_at DESC, id DESC`,
       )
-      .all() as unknown as Array<{ id: string; host_id: string; title: string; updated_at: number }>;
+      .all() as unknown as Array<{
+      id: string;
+      host_id: string;
+      title: string;
+      updated_at: number;
+    }>;
     const filesById = new Map(fileRows.map((session) => [session.id, session]));
     const latestRecords = new Map<string, CatalogRecord>();
 
@@ -392,9 +541,7 @@ function catalogSessions(codexHome: string, fileRows: CodexSession[]): CodexSess
         fromCatalog: true,
       };
     });
-  } finally {
-    database.close();
-  }
+  });
 }
 
 export function listSessions(codexHome = defaultCodexHome()): CodexSession[] {
@@ -447,7 +594,7 @@ function backupStamp(): string {
   return new Date().toISOString().replace(/[-:.TZ]/g, "");
 }
 
-function backupDatabase(database: DatabaseSync, databasePath: string): string {
+export function backupDatabase(database: DatabaseSync, databasePath: string): string {
   const backupPath = `${databasePath}.bak-${backupStamp()}`;
   database.prepare("VACUUM INTO ?").run(backupPath);
   return backupPath;
@@ -529,70 +676,47 @@ function removeDesktopCatalogEntries(
   }
 }
 
-function removeStateDatabaseEntries(
+export function removeThreadDatabaseEntries(
   selectedIds: Set<string>,
   codexHome: string,
 ): {
   removed: number;
-  backupPath?: string;
+  backupPaths: string[];
 } {
-  const databasePath = getStateDatabasePath(codexHome);
+  const ids = [...selectedIds];
+  let removed = 0;
+  const backupPaths: string[] = [];
 
-  if (!fs.existsSync(databasePath)) {
-    return { removed: 0 };
-  }
-
-  const database = new DatabaseSync(databasePath);
-
-  try {
-    if (!tableExists(database, "threads")) {
-      return { removed: 0 };
+  for (const databasePath of getThreadDatabasePaths(codexHome)) {
+    if (!fs.existsSync(databasePath)) {
+      continue;
     }
 
-    const ids = [...selectedIds];
-    const placeholders = ids.map(() => "?").join(", ");
-    const count = Number(
-      (
-        database
-          .prepare(`SELECT COUNT(*) AS count FROM threads WHERE id IN (${placeholders})`)
-          .get(...ids) as { count: number }
-      ).count,
-    );
-
-    if (count === 0) {
-      return { removed: 0 };
-    }
-
-    const backupPath = backupDatabase(database, databasePath);
-    database.exec("BEGIN IMMEDIATE");
+    const database = new DatabaseSync(databasePath);
 
     try {
-      if (tableExists(database, "thread_dynamic_tools")) {
-        database
-          .prepare(`DELETE FROM thread_dynamic_tools WHERE thread_id IN (${placeholders})`)
-          .run(...ids);
+      const tables = threadKeyedTables(database);
+
+      if (tables.length === 0 || countThreadRows(database, tables, ids) === 0) {
+        continue;
       }
 
-      if (tableExists(database, "thread_spawn_edges")) {
-        database
-          .prepare(
-            `DELETE FROM thread_spawn_edges
-              WHERE parent_thread_id IN (${placeholders}) OR child_thread_id IN (${placeholders})`,
-          )
-          .run(...ids, ...ids);
-      }
+      backupPaths.push(backupDatabase(database, databasePath));
+      database.exec("BEGIN IMMEDIATE");
 
-      database.prepare(`DELETE FROM threads WHERE id IN (${placeholders})`).run(...ids);
-      database.exec("COMMIT");
-    } catch (error) {
-      database.exec("ROLLBACK");
-      throw error;
+      try {
+        removed += deleteThreadRows(database, tables, ids);
+        database.exec("COMMIT");
+      } catch (error) {
+        database.exec("ROLLBACK");
+        throw error;
+      }
+    } finally {
+      database.close();
     }
-
-    return { removed: count, backupPath };
-  } finally {
-    database.close();
   }
+
+  return { removed, backupPaths };
 }
 
 function referencesSelectedId(value: unknown, selectedIds: Set<string>): boolean {
@@ -670,6 +794,58 @@ function removeGlobalStateReferences(
   fs.copyFileSync(statePath, backupPath);
   fs.writeFileSync(tmpPath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
   fs.renameSync(tmpPath, statePath);
+  return { removed, backupPath };
+}
+
+export function removeHistoryEntries(
+  selectedIds: Set<string>,
+  codexHome: string,
+): {
+  removed: number;
+  backupPath?: string;
+} {
+  const historyPath = path.join(codexHome, "history.jsonl");
+
+  if (!fs.existsSync(historyPath)) {
+    return { removed: 0 };
+  }
+
+  const lines = fs.readFileSync(historyPath, "utf8").split(/\r?\n/);
+  const kept: string[] = [];
+  let removed = 0;
+
+  for (const line of lines) {
+    if (!line.trim()) {
+      continue;
+    }
+
+    try {
+      const record = JSON.parse(line) as unknown;
+
+      if (
+        isRecord(record) &&
+        typeof record.session_id === "string" &&
+        selectedIds.has(record.session_id)
+      ) {
+        removed += 1;
+        continue;
+      }
+    } catch {
+      // Keep malformed lines untouched.
+    }
+
+    kept.push(line);
+  }
+
+  if (removed === 0) {
+    return { removed: 0 };
+  }
+
+  const backupPath = `${historyPath}.bak-${backupStamp()}`;
+  const tmpPath = `${historyPath}.tmp`;
+  fs.copyFileSync(historyPath, backupPath);
+  fs.writeFileSync(tmpPath, kept.length ? `${kept.join("\n")}\n` : "", "utf8");
+  fs.renameSync(tmpPath, historyPath);
   return { removed, backupPath };
 }
 
@@ -751,12 +927,14 @@ export function deleteSessions(
   }
 
   const catalogResult = removeDesktopCatalogEntries(selectedIds, codexHome);
-  const stateDatabaseResult = removeStateDatabaseEntries(selectedIds, codexHome);
+  const threadDatabaseResult = removeThreadDatabaseEntries(selectedIds, codexHome);
   const globalStateResult = removeGlobalStateReferences(selectedIds, codexHome);
+  const historyResult = removeHistoryEntries(selectedIds, codexHome);
   const additionalBackupPaths = [
     catalogResult.backupPath,
-    stateDatabaseResult.backupPath,
+    ...threadDatabaseResult.backupPaths,
     globalStateResult.backupPath,
+    historyResult.backupPath,
   ].filter((value): value is string => Boolean(value));
 
   let deletedFiles = 0;
@@ -780,8 +958,9 @@ export function deleteSessions(
   return {
     deletedFiles,
     removedIndexEntries,
-    removedDatabaseEntries: catalogResult.removed + stateDatabaseResult.removed,
+    removedDatabaseEntries: catalogResult.removed + threadDatabaseResult.removed,
     removedStateReferences: globalStateResult.removed,
+    removedHistoryEntries: historyResult.removed,
     backupPath,
     additionalBackupPaths,
   };

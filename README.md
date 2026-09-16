@@ -41,6 +41,7 @@ Commands:
   list, ls                List local Codex sessions
   delete, d, rm [session..]
                           Delete Codex sessions after confirmation
+  cleanup                 Remove stale temp files and orphaned session data
   config <action> [value] Read or write codex-s configuration
   help                    Show CLI help
   completion              Print a fish completion script
@@ -98,5 +99,7 @@ cx completion fish > ~/.config/fish/completions/cx.fish
 ## Notes
 
 - Close Codex before deleting sessions so the running app cannot rewrite cached state.
+- Deletion removes rollout files, legacy index entries, Desktop catalog rows, state/cache database rows (`state_5`, `goals_1`, `memories_1`, `queue_1`), Desktop state references, and `history.jsonl` entries for the selected sessions.
 - The CLI backs up every index, database, or Desktop state file that it changes.
+- If Codex Desktop crashes after a manual deletion or failed update, run `cx cleanup` to clear leftover `*.tmp` state files and orphaned rows that reference missing sessions.
 - No sync, archive, rename, or export features are included yet.

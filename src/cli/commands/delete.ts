@@ -67,7 +67,8 @@ export async function runDeleteCommand(
     `\nDeleted ${summary.deletedFiles} session file(s).\n` +
       `Removed ${summary.removedIndexEntries} legacy index entr${summary.removedIndexEntries === 1 ? "y" : "ies"}.\n` +
       `Removed ${summary.removedDatabaseEntries} database entr${summary.removedDatabaseEntries === 1 ? "y" : "ies"}.\n` +
-      `Removed ${summary.removedStateReferences} Desktop state reference${summary.removedStateReferences === 1 ? "" : "s"}.\n`,
+      `Removed ${summary.removedStateReferences} Desktop state reference${summary.removedStateReferences === 1 ? "" : "s"}.\n` +
+      `Removed ${summary.removedHistoryEntries} history entr${summary.removedHistoryEntries === 1 ? "y" : "ies"}.\n`,
   );
 
   if (summary.backupPath) {

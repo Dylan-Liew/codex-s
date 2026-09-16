@@ -33,6 +33,7 @@ function createCli(argv: string[], options: BuildCliOptions = {}): Argv {
     ["$0 config set-home /mnt/c/Users/me/.codex --local", "Persist a local Codex home"] as const,
     ["$0 delete", "Interactively select sessions to delete"] as const,
     ["$0 delete 550e8400", "Delete by session ID prefix"] as const,
+    ["$0 cleanup", "Remove stale temp files and orphaned session data"] as const,
   ];
 
   let cli: Argv = yargs(argv)
