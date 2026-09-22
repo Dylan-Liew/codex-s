@@ -69,8 +69,10 @@ export function getStateDatabasePath(codexHome = defaultCodexHome()): string {
 const THREAD_DATABASE_FILES = [
   "state_5.sqlite",
   "goals_1.sqlite",
+  "logs_2.sqlite",
   "memories_1.sqlite",
   "queue_1.sqlite",
+  "thread_history_1.sqlite",
 ];
 
 export function getThreadDatabasePaths(codexHome = defaultCodexHome()): string[] {

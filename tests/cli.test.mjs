@@ -245,6 +245,25 @@ describe("cx CLI", () => {
       `);
       queue.close();
 
+      const threadHistoryPath = path.join(codexHome, "thread_history_1.sqlite");
+      const threadHistory = new DatabaseSync(threadHistoryPath);
+      threadHistory.exec(`
+        CREATE TABLE thread_turns (id TEXT PRIMARY KEY, thread_id TEXT);
+        CREATE TABLE thread_items (id TEXT PRIMARY KEY, thread_id TEXT);
+        INSERT INTO thread_turns VALUES ('turn-1', '${sessionId}');
+        INSERT INTO thread_items VALUES ('item-1', '${sessionId}');
+      `);
+      threadHistory.close();
+
+      const logsPath = path.join(codexHome, "logs_2.sqlite");
+      const logs = new DatabaseSync(logsPath);
+      logs.exec(`
+        CREATE TABLE logs (id INTEGER PRIMARY KEY, thread_id TEXT, message TEXT);
+        INSERT INTO logs (thread_id, message) VALUES ('${sessionId}', 'deleted thread');
+        INSERT INTO logs (thread_id, message) VALUES ('${fileOnlyId}', 'keep');
+      `);
+      logs.close();
+
       fs.writeFileSync(
         path.join(codexHome, "history.jsonl"),
         `${JSON.stringify({ session_id: sessionId, ts: 1, text: "bye" })}\n` +
@@ -264,7 +283,7 @@ describe("cx CLI", () => {
       const summary = deleteSessions([catalogSession], codexHome);
       assert.equal(summary.deletedFiles, 1);
       assert.equal(summary.removedIndexEntries, 1);
-      assert.equal(summary.removedDatabaseEntries, 7);
+      assert.equal(summary.removedDatabaseEntries, 10);
       assert.equal(summary.removedStateReferences, 3);
       assert.equal(summary.removedHistoryEntries, 1);
       assert.deepEqual(
@@ -275,6 +294,16 @@ describe("cx CLI", () => {
       );
       assert.equal(fs.existsSync(rolloutPath), false);
       assert.equal(fs.existsSync(fileOnlyPath), true);
+
+      for (const databasePath of [threadHistoryPath, logsPath]) {
+        const database = new DatabaseSync(databasePath, { readOnly: true });
+        const table = databasePath === threadHistoryPath ? "thread_turns" : "logs";
+        const remaining = database
+          .prepare(`SELECT COUNT(*) AS count FROM ${table} WHERE thread_id = ?`)
+          .get(sessionId);
+        database.close();
+        assert.equal(remaining.count, 0);
+      }
 
       const remainingIndex = fs.readFileSync(path.join(codexHome, "session_index.jsonl"), "utf8");
       assert.match(remainingIndex, new RegExp(legacyOnlyId));
